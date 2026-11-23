@@ -1,0 +1,158 @@
+version: '3.8'
+
+# DLAP New-UI Development Environment
+# Complete Docker Compose setup for new-ui development with all required infrastructure
+
+services:
+  # PostgreSQL Database with DLAP schema initialization
+  postgresql:
+    image: postgres:15.1
+    container_name: dlap-postgresql-dev
+    volumes:
+      - postgresql-data:/var/lib/postgresql/data
+      - ../../../../docker/init-scripts:/docker-entrypoint-initdb.d
+    environment:
+      - POSTGRES_USER=dlap
+      - POSTGRES_PASSWORD=dlap
+      - POSTGRES_DB=dlap
+      - POSTGRES_MULTIPLE_DATABASES=dlap_common,da_discovery,da_catalog,da_policyengine,da_reporting,da_autolabel,da_autoarchival,da_autodelete,da_autocompliance,da_admin
+      # PostgreSQL optimization settings
+      - POSTGRES_INITDB_ARGS=--data-checksums
+      # Performance tuning
+      - POSTGRES_MAX_CONNECTIONS=200
+      - POSTGRES_SHARED_BUFFERS=256MB
+      - POSTGRES_EFFECTIVE_CACHE_SIZE=768MB
+      - POSTGRES_MAINTENANCE_WORK_MEM=64MB
+      - POSTGRES_WORK_MEM=4MB
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dlap -d dlap"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    command: 
+      - "postgres"
+      - "-c"
+      - "max_connections=200"
+      - "-c"
+      - "shared_buffers=256MB"
+      - "-c"
+      - "effective_cache_size=768MB"
+      - "-c"
+      - "maintenance_work_mem=64MB"
+      - "-c"
+      - "work_mem=4MB"
+      - "-c"
+      - "log_min_duration_statement=1000"
+      - "-c"
+      - "log_connections=on"
+      - "-c"
+      - "log_disconnections=on"
+    restart: unless-stopped
+    networks:
+      - dlap-dev
+
+  # Keycloak Identity and Access Management (UI-specific port 8180)
+  keycloak:
+    image: quay.io/keycloak/keycloak:23.0.1
+    container_name: dlap-keycloak-dev
+    command: 'start-dev --import-realm'
+    volumes:
+      - keycloak_data:/opt/keycloak/data
+      - ./keycloak-import:/opt/keycloak/data/import
+      - ./keycloak-health-check.sh:/opt/keycloak/health-check.sh
+      - ../../../../docker/keycloak/realm-config:/opt/keycloak/data/import-main
+    environment:
+      KC_DB: dev-file
+      KEYCLOAK_ADMIN: admin
+      KEYCLOAK_ADMIN_PASSWORD: admin123
+      KC_FEATURES: scripts
+      KC_HTTP_PORT: 8080
+      KC_HTTPS_PORT: 8443
+      KC_HEALTH_ENABLED: true
+      KC_HOSTNAME_STRICT: false
+      KC_HOSTNAME_STRICT_HTTPS: false
+      KC_LOG_LEVEL: INFO
+      # Social Login Environment Variables
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-your-google-client-id}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-your-google-client-secret}
+      FACEBOOK_APP_ID: ${FACEBOOK_APP_ID:-your-facebook-app-id}
+      FACEBOOK_APP_SECRET: ${FACEBOOK_APP_SECRET:-your-facebook-app-secret}
+    ports:
+      - "8180:8080"
+      - "8443:8443"
+    networks:
+      - dlap-dev
+    healthcheck:
+      test: 'bash /opt/keycloak/health-check.sh'
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+    depends_on:
+      - postgresql
+    restart: unless-stopped
+
+  # Single Kafka container with KRaft mode (no Zookeeper needed)
+  kafka:
+    image: confluentinc/cp-kafka:7.5.3
+    container_name: dlap-kafka-dev
+    environment:
+      # KRaft mode configuration
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: 'broker,controller'
+      KAFKA_CONTROLLER_QUORUM_VOTERS: '1@kafka:29093'
+      KAFKA_LISTENERS: 'PLAINTEXT://kafka:29092,CONTROLLER://kafka:29093,PLAINTEXT_HOST://0.0.0.0:9092'
+      KAFKA_INTER_BROKER_LISTENER_NAME: 'PLAINTEXT'
+      KAFKA_ADVERTISED_LISTENERS: 'PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092'
+      KAFKA_CONTROLLER_LISTENER_NAMES: 'CONTROLLER'
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: 'CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT'
+      
+      # Cluster settings for KRaft
+      KAFKA_CLUSTER_ID: 'MkU3OEVBNTcwNTJENDM2Qk'
+      
+      # Topic and replication settings (single node)
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: 'true'
+      KAFKA_NUM_PARTITIONS: 3
+      KAFKA_DEFAULT_REPLICATION_FACTOR: 1
+      KAFKA_MIN_INSYNC_REPLICAS: 1
+      
+      # Performance and retention settings
+      KAFKA_LOG_RETENTION_HOURS: 168
+      KAFKA_LOG_SEGMENT_BYTES: 1073741824
+      KAFKA_CONFLUENT_SUPPORT_METRICS_ENABLE: 'false'
+      
+      # Memory settings for development
+      KAFKA_HEAP_OPTS: "-Xmx512M -Xms512M"
+      
+      # Log directories for KRaft
+      KAFKA_LOG_DIRS: '/var/lib/kafka/data'
+    volumes:
+      - kafka-kraft-data:/var/lib/kafka/data
+    networks:
+      - dlap-dev
+    ports:
+      - "9092:9092"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "kafka-topics", "--bootstrap-server", "localhost:9092", "--list"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+networks:
+  dlap-dev:
+    driver: bridge
+
+volumes:
+  keycloak_data:
+    driver: local
+  postgresql-data:
+    driver: local
+  kafka-kraft-data:
+    driver: local

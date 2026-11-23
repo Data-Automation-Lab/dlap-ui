@@ -1,0 +1,33 @@
+{
+  "compilerOptions": {
+    "target": "ES2017",
+    "lib": [
+      "DOM",
+      "DOM.Iterable",
+      "ES2017",
+      "ES2018"
+    ],
+    "allowJs": true,
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "allowSyntheticDefaultImports": true,
+    "strict": true,
+    "forceConsistentCasingInFileNames": true,
+    "noFallthroughCasesInSwitch": true,
+    "module": "ESNext",
+    "moduleResolution": "node",
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "noEmit": true,
+    "jsx": "react-jsx",
+    "baseUrl": ".",
+    "paths": {
+      "keycloak-js": ["node_modules/keycloak-js/lib/keycloak.d.ts"],
+      "@/ui/*": ["src/ui/*"],
+      "@/*": ["src/*"]
+    }
+  },
+  "include": [
+    "src"
+  ]
+} 

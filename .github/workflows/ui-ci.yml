@@ -1,0 +1,247 @@
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+
+# UI CI for the DLAP frontend (frontend/). The sdg repository mounts this repo as
+# the new-ui submodule and does not build it; this workflow is the UI's gate.
+#
+# Blocking: the secret scan, lint (zero warnings, QA-02), typecheck, unit tests (test:ci)
+# and the production build.
+#
+# Cost controls (the org is on the GitHub Free plan): a planner job that runs the
+# typecheck, test and build job only when frontend/ or this workflow changed,
+# cancel-in-progress, a timeout, and the npm cache. The secret scan (Q-170) is not
+# path filtered: a credential can land in docs/, src/main/docker/ or dev-setup/
+# as easily as in frontend/, so it runs on every push and pull request.
+# Every action is pinned to a full commit SHA with its release as a comment.
+name: UI CI
+
+on:
+  push:
+    branches: [ master, main ]
+  pull_request:
+    branches: [ master, main ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ui-ci-${{ github.event_name }}-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  # Decides whether the frontend job runs. A push or pull request that touches
+  # neither frontend/ nor this workflow skips it; a manual run, a new branch, a
+  # force push or an unknown base runs it.
+  changes:
+    name: Plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      run_ui: ${{ steps.plan.outputs.run_ui }}
+    steps:
+      - name: Check out the full history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Decide whether the frontend job runs
+        id: plan
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PUSH_BEFORE: ${{ github.event.before }}
+          PUSH_AFTER: ${{ github.sha }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          base=""; head=""
+          case "$EVENT_NAME" in
+            pull_request) base="$PR_BASE"; head="$PR_HEAD" ;;
+            push)         base="$PUSH_BEFORE"; head="$PUSH_AFTER" ;;
+          esac
+          run_ui=true
+          if [ -n "${base//0/}" ] && git cat-file -e "${base}^{commit}" 2>/dev/null \
+             && git cat-file -e "${head}^{commit}" 2>/dev/null; then
+            if ! git diff --name-only "$base" "$head" | grep -q -E '^(frontend/|\.github/workflows/ui-ci\.yml$)'; then
+              run_ui=false
+            fi
+          fi
+          echo "Frontend job: run_ui=$run_ui"
+          echo "run_ui=$run_ui" >> "$GITHUB_OUTPUT"
+
+  ui:
+    name: Typecheck, test, build
+    needs: changes
+    if: ${{ needs.changes.outputs.run_ui == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: bash
+        working-directory: frontend
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # The exact release the Gradle build downloads (build.gradle, node { version }): Q-545 was a test
+      # that passed on a floating 22.x here and failed on the older release Gradle ran.
+      # frontend/src/buildToolchain.test.ts keeps the two lines equal.
+      - name: Set up Node.js 22.23.3
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '22.23.3'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+
+      # Blocking since QA-02: "npm run lint" is eslint with --max-warnings 0, so a warning
+      # fails the job exactly like an error. Rules live in frontend/eslint.config.js.
+      - name: Lint
+        run: npm run lint
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Unit tests
+        run: npm run test:ci
+
+      - name: Production build
+        run: npm run build
+
+  # Secret scan (Q-170, work package SECUI), modelled on the secret-scan job of the
+  # sdg repository. gitleaks, pinned by release tag and image digest (the same
+  # digest is published on Docker Hub and ghcr.io; ghcr.io has no pull limit),
+  # with the narrow allowlists in .gitleaks.toml.
+  #   push, pull request  the commits the event adds (base..head); a new branch, a
+  #                       force push or an unknown base scans the pushed history
+  #   manual              the whole history, all refs
+  # Findings print redacted; no report is uploaded. Inline "gitleaks:allow"
+  # comments are ignored, so every exception is a reviewed change to .gitleaks.toml.
+  # A newer push to the same branch cancels a scan that is still running (the
+  # workflow concurrency group), so a push scan can be lost when two pushes land
+  # within a minute or two. The pull request scan and a manual whole-history run
+  # still cover those commits.
+  # Bump the image: change GITLEAKS_IMAGE here and the one in sdg's dlap-ci-cd.yml.
+  secret-scan:
+    name: Secret scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      GITLEAKS_IMAGE: ghcr.io/gitleaks/gitleaks:v8.30.1@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f
+    steps:
+      - name: Check out the full history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      # Proves the config still catches what it must and allows only what it
+      # lists. The canary values are built from fragments, so this file never
+      # contains a value the scanner would match. Each case is a throwaway repo.
+      - name: Self-test the gitleaks configuration (canaries)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cfg="$PWD/.gitleaks.toml"
+          work="$(mktemp -d)"
+          trap 'rm -rf "$work"' EXIT
+          slack="https://hooks.slack.com""/services/T01ABCDEFGH/B02IJKLMNOP/aB3dE5gH7jK9mN1pQ3sT5vX7"
+          gcp="AIza""SyA3x9Kq2LmN7pRt5VwYb8Zc1Df4Gh6Jk0"
+          bearer="vT9mQx2LpR7sKdW4nYb8""ZcF3hJ6gAe1UoXi5N"
+          ph="YOUR_""TOKEN"
+          curl='curl -X DELETE http://localhost/x -H "Authorization: Bearer'
+          failed=0
+          # run_case <name> <leak|clean> <path> <content>
+          run_case() {
+            local name="$1" expect="$2" path="$3" content="$4" dir="$work/$1" rc=0 got
+            mkdir -p "$dir/$(dirname "$path")"
+            git init -q "$dir"
+            printf '%s\n' "$content" > "$dir/$path"
+            git -C "$dir" add -A
+            git -C "$dir" -c user.name=ci -c user.email=ci@example.invalid commit -q -m "canary $name"
+            docker run --rm -v "$dir:/repo" -v "$cfg:/cfg/.gitleaks.toml:ro" "$GITLEAKS_IMAGE" \
+              git /repo --config /cfg/.gitleaks.toml --redact --no-banner --no-color --ignore-gitleaks-allow \
+              >/dev/null 2>&1 || rc=$?
+            got=clean
+            if [ "$rc" -eq 1 ]; then got=leak; elif [ "$rc" -gt 1 ]; then got="error($rc)"; fi
+            if [ "$got" = "$expect" ]; then
+              echo "ok    $name: $got"
+            else
+              echo "::error title=gitleaks self-test::$name expected $expect, got $got"
+              failed=1
+            fi
+          }
+          run_case clean-baseline            clean frontend/src/App.tsx "export const answer = 42;"
+          run_case slack-webhook-detected    leak  frontend/src/pages/Notify.tsx "const url = \"$slack\";"
+          run_case inline-allow-ignored      leak  frontend/src/pages/Notify.tsx "const url = \"$slack\"; // gitleaks:allow"
+          run_case gcp-key-detected          leak  frontend/src/pages/Policy.tsx "const key = \"$gcp\";"
+          run_case pinned-to-old-commits     leak  frontend/build/static/js/main.0b3374f0.js "var u=\"$slack\";"
+          run_case placeholder-allowed       clean docs/api/delete-agent-test.md "$curl ${ph}\""
+          run_case placeholder-other-path    leak  docs/api/other-endpoint.md "$curl ${ph}\""
+          run_case real-token-same-path      leak  docs/api/delete-agent-test.md "$curl ${bearer}\""
+          exit "$failed"
+
+      - name: Scan for secrets
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PUSH_BEFORE: ${{ github.event.before }}
+          PUSH_AFTER: ${{ github.sha }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          log_opts=""
+          case "$EVENT_NAME" in
+            pull_request)
+              scope="pull request commits ${PR_BASE:0:12}..${PR_HEAD:0:12}"
+              log_opts="${PR_BASE}..${PR_HEAD}"
+              ;;
+            push)
+              if [ -n "${PUSH_BEFORE//0/}" ] && git cat-file -e "${PUSH_BEFORE}^{commit}" 2>/dev/null; then
+                scope="pushed commits ${PUSH_BEFORE:0:12}..${PUSH_AFTER:0:12}"
+                log_opts="${PUSH_BEFORE}..${PUSH_AFTER}"
+              else
+                scope="all history of ${PUSH_AFTER:0:12} (new branch, force push or unknown base)"
+                log_opts="${PUSH_AFTER}"
+              fi
+              ;;
+            *)
+              scope="whole history, all refs"
+              ;;
+          esac
+          echo "Secret scan scope: $scope"
+          args=(git /repo --config /repo/.gitleaks.toml --redact --no-banner --no-color --ignore-gitleaks-allow --verbose)
+          if [ -n "$log_opts" ]; then args+=("--log-opts=$log_opts"); fi
+          rc=0
+          docker run --rm -v "$PWD:/repo" "$GITLEAKS_IMAGE" "${args[@]}" || rc=$?
+          {
+            echo "### Secret scan"
+            echo "Scope: $scope"
+            if [ "$rc" -eq 0 ]; then echo "Result: no leaks found"; else echo "Result: FAILED (gitleaks exit code $rc)"; fi
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$rc" -ne 0 ]; then
+            echo "::error title=Secret scan::gitleaks exit code $rc. Revoke or rotate the credential first, then remove it. Values are redacted in this log. Policy and local reproduction: header of .gitleaks.toml."
+            exit 1
+          fi

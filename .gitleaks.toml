@@ -1,0 +1,167 @@
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+
+# gitleaks configuration for the DLAP UI repository (Q-170, work package SECUI).
+# Modelled on .gitleaks.toml in the sdg repository (work package CI-02a).
+#
+# Used by the "Secret scan" job in .github/workflows/ui-ci.yml (pinned gitleaks
+# image; push and pull request scan the added commits, a manual run scans the
+# whole history). Local reproduction from the repository root:
+#   docker run --rm -v "$PWD:/repo" ghcr.io/gitleaks/gitleaks:v8.30.1 \
+#     git /repo --config /repo/.gitleaks.toml --redact --no-banner --ignore-gitleaks-allow
+# The image digest is pinned in ui-ci.yml (GITLEAKS_IMAGE); use that value in CI.
+#
+# Policy
+#   1. The default gitleaks rules stay on. Nothing here switches a rule off.
+#   2. An allowlist entry is narrow: it names the rule (targetRules) AND the
+#      path AND either the exact placeholder value or the exact commits.
+#      "condition = AND" makes gitleaks require every listed field to match.
+#      Never allowlist a path on its own, and never allowlist a live credential
+#      to make a build pass: rotate or revoke it first.
+#   3. Inline "gitleaks:allow" comments do not work in CI (the job passes
+#      --ignore-gitleaks-allow). Every exception lives in this file.
+#   4. Entries pinned to a commit cover history that cannot change. If history
+#      is ever rewritten, the pinned SHAs change and the entries must be redone.
+#   5. A browser app cannot keep a secret. Nothing prefixed VITE_ or REACT_APP_
+#      is private: Vite compiles those values into the public bundle. A
+#      credential must live on a server, never in this repository or its build.
+#
+# Triage of the 2026-10-19 scan (gitleaks 8.30.1, default rules, a mirror clone
+# of the repository with every ref, 178 commits, 38 findings, none reported by
+# value). With this file the same scan finds 0.
+#   - 22 findings: one Slack incoming-webhook URL, compiled into ten committed
+#     build bundles (20 files with their source maps; nine under frontend/build,
+#     one under build) and written into DataDiscoveryAgentConfig.tsx (two
+#     copies). The bundle at master was the last tracked copy; it is untracked
+#     now. LIVE-LOOKING: it must be revoked (entries 2 and 3).
+#   - 1 finding: a Google API key in PolicyManagement.tsx (entry 4). LIVE-LOOKING.
+#   - 1 finding: an expired Keycloak access token from a local development
+#     realm, in crawler.tsx (entry 5).
+#   - 12 findings: JHipster scaffold development secrets (entry 6).
+#   - 2 findings: "Authorization: Bearer YOUR_TOKEN" placeholders in two
+#     Markdown curl examples (entry 1, a verified false positive).
+# The current tree of master holds none of them after the commit that stops
+# tracking frontend/build. History and other branches still hold the values,
+# so removing them from the tree is not a fix: rotate or revoke each one.
+
+title = "DLAP UI gitleaks configuration"
+
+[extend]
+useDefault = true
+
+# ---------------------------------------------------------------------------
+# Verified false positive. Pinned by rule, path and exact value, so a real
+# token added to the same files, or the same value in another file, is still
+# reported.
+# ---------------------------------------------------------------------------
+
+# 1. Placeholder bearer token in the curl examples of two API docs (Q-170). The
+#    value is the literal text YOUR_TOKEN, a placeholder, not a credential.
+[[allowlists]]
+description = "Placeholder bearer token in two Markdown curl examples (Q-170)"
+condition = "AND"
+targetRules = ["curl-auth-header"]
+paths = ['''^docs/api/delete-agent-(custom-auth|test)\.md$''']
+regexes = ['''^YOUR_TOKEN$''']
+
+# ---------------------------------------------------------------------------
+# History-only findings, pinned by rule, commits and paths. None of these
+# values is in the current tree of master. Each one LOOKS LIVE unless noted
+# and must be rotated or revoked (see the rotation note kept with Q-170).
+# Allowlisting a value so the history scan stays usable does not make it safe.
+# ---------------------------------------------------------------------------
+
+# 2. Slack incoming-webhook URL compiled into committed build bundles (nine
+#    under frontend/build and one under the root build directory) in ten
+#    commits between 2025-05-25 and 2025-10-23. One URL, repeated in every
+#    bundle and its source map (Q-170).
+#    ACTION: revoke the webhook in the Slack app settings (Incoming Webhooks,
+#    remove the URL) and create a new one only if a server needs it.
+[[allowlists]]
+description = "Historic Slack webhook URL inside committed build bundles (Q-170, revoke it)"
+condition = "AND"
+targetRules = ["slack-webhook-url"]
+commits = [
+  "c201867c38130206ed41a3fe07215fc024ad63fd",
+  "bdcee84f01491fb4107f097c59db8a86456b38a2",
+  "547b6059ae71b84e8122b41f26be6d65c7dad04b",
+  "da4ecd552c135e6a15ebd17098496eb13d564315",
+  "6214350565c59085d33742c85b92d8de5670055c",
+  "1b0d5d701597359fa2b4e9562b1f3e3f7033d1bc",
+  "b4edb88cbc519aac2583f4eee7791cf881c1d15a",
+  "946210ab60f00f0507e9265e80c7fe63789761ed",
+  "9d7a72b31c869a1ab13ace2d3f782542c118c40d",
+  "f25425a6417c4bcbd1d69b3cf4d88b9319528b48",
+]
+paths = ['''^(frontend/)?build/static/js/main\.[0-9a-f]{8}\.js(\.map)?$''']
+
+# 3. The same URL written into the discovery agent config page source, in the
+#    first commit that added it and in the import of the auto-label branch
+#    (Q-170). Removed from the source in 1196017 (2026-07-02).
+[[allowlists]]
+description = "Historic Slack webhook URL in DataDiscoveryAgentConfig.tsx (Q-170, revoke it)"
+condition = "AND"
+targetRules = ["slack-webhook-url"]
+commits = [
+  "c201867c38130206ed41a3fe07215fc024ad63fd",
+  "9d7a72b31c869a1ab13ace2d3f782542c118c40d",
+]
+paths = ['''^(frontend/)?src/pages/DataDiscoveryAgentConfig\.tsx$''']
+
+# 4. Google API key written into the policy management page in January 2025
+#    (old JHipster layout, path gone from master; still at the tip of the
+#    remote gateway-ui branch) (Q-170).
+#    ACTION: delete or restrict the key in the Google Cloud console
+#    (APIs and Services, Credentials), then create a restricted replacement
+#    if the feature is still needed.
+[[allowlists]]
+description = "Historic Google API key in PolicyManagement.tsx (Q-170, revoke it)"
+condition = "AND"
+targetRules = ["gcp-api-key"]
+commits = ["c1d27e78bf8a47531a53e9de270d908108a2d4aa"]
+paths = ['''^src/main/webapp/app/shared/layout/settings/policyEngine/PolicyManagement\.tsx$''']
+
+# 5. Keycloak access token (RS256, five minute lifetime) pasted into the
+#    crawler settings page on 2024-12-04. Issued by a local development
+#    realm (localhost issuer), expired the same day, and removed from the
+#    branch two commits later (Q-170). Not usable as it stands; it matters only
+#    if that development realm's signing key was ever reused in a deployed
+#    environment.
+[[allowlists]]
+description = "Historic expired development Keycloak access token in crawler.tsx (Q-170)"
+condition = "AND"
+targetRules = ["jwt"]
+commits = ["2e19d2b67bfdc1ab8383c235c062c295194d0bf0"]
+paths = ['''^src/main/webapp/app/shared/layout/settings/crawler/crawler\.tsx$''']
+
+# 6. JHipster scaffold: generated development secrets (a JWT signing secret in
+#    .yo-rc.json and the two dev server configs, and client secrets of the
+#    dev Keycloak realm export), all from one 2024-07-19 generator commit
+#    (Q-170). Local development defaults; none is known to be deployed. The
+#    same scaffold is allowlisted the same way in the sdg repository.
+#    ACTION: none if no deployed environment used them; otherwise regenerate
+#    them there.
+[[allowlists]]
+description = "JHipster scaffold development secrets in the 2024-07-19 generator commit (Q-170)"
+condition = "AND"
+targetRules = ["generic-api-key"]
+commits = ["88857cdb40f7cdcb11bae9f43fcf394242bdacca"]
+paths = [
+  '''^\.yo-rc\.json$''',
+  '''^src/main/docker/central-server-config/(docker|localhost)-config/application\.yml$''',
+  '''^src/main/docker/realm-config/jhipster-realm\.json$''',
+]

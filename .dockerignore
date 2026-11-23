@@ -1,0 +1,9 @@
+# node_modules is reinstalled by `npm ci` in the frontend-build stage; the local
+# copy also contains a self-referential symlink (node_modules/dlap-ui -> frontend/)
+# that breaks the Docker build-context load.
+**/node_modules
+
+# build cruft (the Dockerfile only needs build/libs/*.jar, kept)
+.gradle
+**/*.log
+.git
